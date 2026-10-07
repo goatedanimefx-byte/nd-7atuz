@@ -328,9 +328,16 @@ def resolve_captions(clip, word_times, sents=None):
         # papercut: one caption chip per SENTENCE, windowed by the exact
         # SentenceBoundary audio times — chips appear precisely when the
         # sentence is spoken (no drift past real speech onset/offset).
-        if clip.get("motif") == "papercut" and sents:
-            caps = [(float(s0), float(s1), " ".join(ts))
-                    for s0, s1, ts in sents]
+        if clip.get("motif") == "papercut":
+            cpf = INP / "caps_papercut.json"
+            if cpf.exists():
+                caps = [tuple(x) for x in json.loads(
+                    cpf.read_text(encoding="utf-8"))]
+            elif sents:
+                caps = [(float(s0), float(s1), " ".join(ts))
+                        for s0, s1, ts in sents]
+            else:
+                caps = None
         else:
             # group words into readable chunks (<= 8 words, breaks near full
             # stops)
@@ -350,7 +357,8 @@ def resolve_captions(clip, word_times, sents=None):
         hard = float(clip.get("duration") or (word_times[-1][1] + 0.5))
         for i in range(len(caps)):
             e = caps[i + 1][0] if i + 1 < len(caps) else hard
-            caps[i] = (caps[i][0], min(e, hard), caps[i][2])
+            caps[i] = ((caps[i][0], min(e, hard), caps[i][2])
+                       + (caps[i][3:] if len(caps[i]) > 3 else ()))
         return caps
     # phrase-sync: one caption per beat from the on-screen text
     out = []
@@ -392,7 +400,8 @@ def build_html(clip, caps=None):
     W, H = int(clip.get("width", 1080)), int(clip.get("height", 1920))
     beat_json = json.dumps(clip["beats"]).replace("</", "<\\/")
     caps_json = json.dumps(
-        [[float(c[0]), float(c[1]), str(c[2])] for c in caps]
+        [[float(c[0]), float(c[1]), str(c[2])]
+         + ([list(c[3])] if len(c) > 3 else []) for c in caps]
         if caps else []).replace("</", "<\\/")
     return """<!doctype html><html><head><meta charset="utf-8">
 <style>html,body{margin:0;background:#01030a;overflow:hidden}</style></head>
@@ -886,14 +895,57 @@ function renderPapercut(t){
   function tape(dx,dy,s,rot){x.save();x.translate(dx,dy);x.rotate(rot||0.7);
     x.fillStyle='rgba(232,216,182,0.8)';x.fillRect(-s/2,-s/8,s,s/4);x.restore();}
 
-  // ---- camera: per-beat impact settle + live nervous hand ----
+  // ---- turntable stand: the evidence-board sits on a spinning display base ----
+  function drawStand(){
+    var sx=W/2,sy=H*0.865;
+    x.fillStyle='rgba(52,32,12,0.16)';
+    x.beginPath();x.ellipse(sx,sy+10,W*0.30,24,0,0,6.2832);x.fill();
+    x.fillStyle='#96764a';x.fillRect(sx-11,sy-118,22,148);
+    x.fillStyle='rgba(120,92,52,0.5)';x.fillRect(sx-15,sy-40,30,9);
+    var grb=x.createLinearGradient(0,sy-28,0,sy+28);
+    grb.addColorStop(0,'#b08a55');grb.addColorStop(1,'#8a6a3a');
+    x.fillStyle=grb;x.beginPath();x.ellipse(sx,sy,W*0.32,30,0,0,6.2832);x.fill();
+    x.fillStyle='#a5824e';x.beginPath();x.ellipse(sx,sy-10,W*0.32,16,0,0,6.2832);x.fill();
+    for(var rs=0;rs<3;rs++){
+      var rw=W*(0.15+rs*0.075),ph=t*(0.55+rs*0.3)+rs*1.8;
+      x.strokeStyle='rgba(200,172,126,'+(0.42-rs*0.09)+')';x.lineWidth=2.5;
+      for(var sa=0;sa<5;sa++){
+        var a0=ph+sa/5*6.2832;
+        x.beginPath();x.ellipse(sx,sy-30-rs*8,rw,rw*0.34,a0*0.5,0,Math.PI*0.62);x.stroke();
+      }
+    }
+    x.fillStyle='rgba(60,42,20,0.4)';x.font='700 15px Arial';x.textAlign='center';
+    x.fillText('TURNTABLE 0'+(i0+1)+' / 0'+tot,sx,sy+Math.min(44,30+rs*8));
+    x.textAlign='left';
+  }
+  // red office stamp seal (evidence stamp on the board)
+  function stampSeal(dx,dy,s,rot,txt){
+    var sc=pi(0.10);
+    if(sc<=0)return;
+    x.save();x.globalAlpha=0.85*sc;x.translate(dx,dy);x.rotate(rot);
+    x.strokeStyle=RED;x.lineWidth=Math.max(2,s*0.055);x.lineCap='round';
+    x.beginPath();x.arc(0,0,s/2,0,6.2832);x.stroke();
+    x.beginPath();x.arc(0,0,s/2-5,0,6.2832);x.stroke();
+    x.font='900 '+Math.round(s*0.15)+'px Impact,Arial';x.textAlign='center';x.textBaseline='middle';
+    x.fillStyle=RED;x.fillText(txt,0,0);
+    x.fillStyle='rgba(255,255,255,0.18)';x.fillText(txt,1,1);
+    x.restore();
+  }
+
+  // ---- camera: no start zoom; per-beat point A->B slide + turntable sway ---
+  var PAN=[0,-36,42,-34,40,8,-40,30];
+  var ROT=[0,-0.012,0.010,-0.012,0.012,0.006,-0.010,0.009];
   var st=cl((t-bs)/0.34),sm=eo(st),imp=1-sm;
-  var kickX=Math.sin(i0*2.6)*30*imp,kickY=Math.cos(i0*1.4)*22*imp,rotPunch=Math.sin(i0*3.7)*0.018*imp;
-  var tbx=Math.sin(t*1.9)*10+Math.sin(t*3.7)*5,tby=Math.cos(t*2.3)*8+Math.cos(t*4.1)*4;
-  var kz=1+0.045*sm+0.03*Math.sin(t*1.4)+0.006*Math.sin(t*0.5);
+  var kickX=Math.sin(i0*2.6)*15*imp,kickY=Math.cos(i0*1.4)*10*imp,rotPunch=Math.sin(i0*3.7)*0.009*imp;
+  var tbx=Math.sin(t*1.9)*8.5+Math.sin(t*3.7)*4,tby=Math.cos(t*2.3)*7+Math.cos(t*4.1)*3;
+  var finalPhase=(i0===tot-1)&&(t>bs+0.9);
+  var kz=(finalPhase?Math.max(0.80,1-0.20*eo(cl((t-bs-0.9)/1.4))):1)
+         *(1+0.018*sm+0.019*Math.sin(t*1.4)+0.006*Math.sin(t*0.5));
+  var panA=i0>0?PAN[i0-1]:0,panB=PAN[i0],panX=(panA+(panB-panA)*eo(cl((t-bs)/0.5)))*0.85+Math.sin(t*0.3+i0)*3;
+  var rotT=ROT[i0]*(0.6+0.4*Math.sin(t*0.35+i0*2.4))+0.006*Math.sin(t*0.4+i0*2.1);
   x.save();
-  x.translate(W/2+kickX+tbx,H/2+kickY+tby);
-  x.rotate(rotPunch*0.6+0.004*Math.sin(t*0.5));
+  x.translate(W/2+kickX+tbx+panX,H/2+kickY+tby);
+  x.rotate(rotT+rotPunch*0.6+0.003*Math.sin(t*0.5));
   x.scale(kz,kz);
   x.translate(-W/2,-H/2);
 
@@ -1124,6 +1176,7 @@ function renderPapercut(t){
     paperStrip(W*0.50,H*0.66,150,40,0.00,PAP,12,6,pi(0.3));
     paperText('THE CLOCK NEVER STOPS',W*0.50,H*0.66,26,0,RED,0.95*pi(0),2);
   }
+  drawStand();
   // paper-tremble weave across the whole diorama
   x.save();x.translate(Math.sin(t*1.7)*4+Math.sin(t*0.6)*3,Math.cos(t*2.3)*3.5+Math.cos(t*0.8)*2);
   switch(i0){
@@ -1131,6 +1184,12 @@ function renderPapercut(t){
     case 3:scene3();break; case 4:scene4();break; case 5:scene5();break;
     case 6:scene6();break; case 7:scene7();break; default:scene0();
   }
+  // red evidence seals stamped onto the board, one per beat
+  var sealPos=[[0.83,0.23,-0.13,54],[0.18,0.29,0.15,56],[0.815,0.345,0.20,52],
+               [0.155,0.265,0.11,56],[0.815,0.30,0.13,52],[0.21,0.20,0.11,54],
+               [0.845,0.235,0.15,52],[0.79,0.625,0.10,58]];
+  var sp=sealPos[i0];
+  stampSeal(W*sp[0],H*sp[1],sp[3],sp[2],'SEAL 0'+(i0+1));
   x.restore();
 
   // ---- headline: paper-cut type, snapped in (no alpha fade) + beat jump ----
@@ -1146,11 +1205,13 @@ function renderPapercut(t){
     paperText(hlns[hl],0,0,hsz,(hl%2?-0.008:0.008)+Math.sin(t*0.3+hl)*0.008,INK,hseq,6);
     x.restore();
   }
-  // beat jump line (red) under headline
-  var pp=ease(cl((t-bs)/len));
-  x.strokeStyle=RED;x.lineWidth=6;x.lineCap='round';
-  x.beginPath();x.moveTo(W/2-150,H*0.30);x.lineTo(W/2-150+Math.max(6,(W-300)*pp),H*0.30);x.stroke();
-  x.fillStyle=RED;x.beginPath();x.arc(W/2-150+Math.max(6,(W-300)*pp),H*0.30,7,0,6.2832);x.fill();
+  // beat jump line (red) under headline (hidden during final whole-board reveal)
+  if(!finalPhase){
+    var pp=ease(cl((t-bs)/len));
+    x.strokeStyle=RED;x.lineWidth=6;x.lineCap='round';
+    x.beginPath();x.moveTo(W/2-150,H*0.30);x.lineTo(W/2-150+Math.max(6,(W-300)*pp),H*0.30);x.stroke();
+    x.fillStyle=RED;x.beginPath();x.arc(W/2-150+Math.max(6,(W-300)*pp),H*0.30,7,0,6.2832);x.fill();
+  }
 
   x.restore();
 
@@ -1215,8 +1276,14 @@ var lns=[],cur=wts[0],cw=0;
         paperStrip(W/2,cyy,chipW,chipH,0.0,CREAM,18,9,0.97);
         tape(W/2-chipW/2+16,cyy-chipH/2+12,30,0.85);tape(W/2+chipW/2-16,cyy-chipH/2+12,30,-0.85);
         tape(W/2-chipW/2+16,cyy+chipH/2-12,30,-0.85);tape(W/2+chipW/2-16,cyy+chipH/2-12,30,0.85);
-        var frac=cl((t-c0)/(c1-c0));
-        var aw=Math.min(wts.length-1,Math.floor(frac*wts.length));
+        var WT=CAPS[cp][3];
+        var aw=0;
+        if(WT&&WT.length===wts.length){
+          for(var wk=0;wk<WT.length;wk++){ if(WT[wk][1]<=t+0.002&&wk<WT.length-1){aw=wk+1; } }
+        } else {
+          var frac=cl((t-c0)/(c1-c0));
+          aw=Math.min(wts.length-1,Math.floor(frac*wts.length));
+        }
         var gi=0;
         x.textAlign='left';x.textBaseline='middle';x.font='900 '+fs+'px Impact,"Arial Black",Arial';
         for(var li2=0;li2<nL;li2++){
@@ -1245,10 +1312,25 @@ var lns=[],cur=wts[0],cw=0;
     }
   }
 
-  // ---- top-left beat tag ----
-  paperStrip(64,92,132,44,0,MUTE,10,4,0.95);
-  x.font='900 26px Impact,"Arial Black",Arial';x.textAlign='center';x.textBaseline='middle';
-  x.fillStyle=PAP;x.fillText('BEAT '+('0'+(i0+1))+' / '+('0'+tot),64+66,92);
+  // ---- top-left: red case stamp + STATUS paper tag ----
+  var STATUS=['SITE UNSEALED','ENTRY','VICTIMS','KILLER INSIDE','STAYED','EVIDENCE','OPEN','STILL OPEN'];
+  var stp=eo(cl((t-bs)/0.55));
+  if(stp>0.03){
+    x.save();x.translate(66,98);x.rotate(-0.05);
+    if(stp<1)x.scale(Math.max(0.05,stp),Math.max(0.05,stp));
+    x.strokeStyle=RED;x.lineWidth=4;x.lineCap='round';
+    x.beginPath();x.arc(0,0,36,0,6.2832);x.stroke();
+    x.beginPath();x.arc(0,0,31,0,6.2832);x.stroke();
+    x.font='900 14px Impact,Arial';x.textAlign='center';x.textBaseline='middle';
+    x.fillStyle=RED;x.fillText('CASE',0,-17);x.fillText('FILE',0,-3);
+    x.font='900 12px Impact,Arial';x.fillText('0'+(i0+1)+'/'+('0'+tot),0,12);
+    x.strokeStyle=RED;x.lineWidth=2;x.beginPath();x.moveTo(-30,24);x.lineTo(30,24);x.stroke();
+    x.restore();
+  }
+  var SSTAT=STATUS[i0];
+  paperStrip(166,76,Math.min(300,60+SSTAT.length*12.5),38,0.02,MUTE,10,4,0.95*cl((t-bs)/0.5));
+  x.font='700 20px Arial';x.textAlign='left';x.textBaseline='middle';
+  x.fillStyle=PAP;x.fillText('STATUS: '+SSTAT,174,76);
   x.textBaseline='alphabetic';x.textAlign='left';
 
   // ---- bottom progress strip ----
@@ -1271,6 +1353,8 @@ var lns=[],cur=wts[0],cw=0;
   vg.addColorStop(0,'rgba(70,50,20,0)');vg.addColorStop(1,'rgba(60,40,18,0.22)');
   x.fillStyle=vg;x.fillRect(0,0,W,H);
 }
+
+
 
 window.__render=frame;
 })();
