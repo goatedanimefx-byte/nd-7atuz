@@ -1,0 +1,39 @@
+<!doctype html><html><head><meta charset="utf-8"><title>AI Image Gen - measured results</title>
+<style>
+body{background:#0a0a0a;color:#e8e8e8;font:14px/1.5 system-ui,sans-serif;margin:0;padding:22px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:26px 0 8px;color:#ffd479}
+.sub{color:#888;font-size:12px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.c{background:#151515;border:1px solid #262626;border-radius:8px;overflow:hidden}
+.c img{width:100%;display:block}
+.m{padding:8px 10px;font-size:11px;color:#9ad;font-family:ui-monospace,monospace}
+.n{font-weight:700;color:#fff;font-size:13px}
+.bad{border-color:#a33}.good{border-color:#2a5}
+.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px}
+.t-good{background:#1d4d2b;color:#8fdfa8}.t-bad{background:#5d1d1d;color:#ffa8a8}
+</style></head><body>
+<h1>Free AI image generation &mdash; measured output</h1>
+<div class="sub">True-crime / horror prompts &middot; 2026-10-04 &middot; Pollinations (free, no key) &middot; all objective metrics, no eyeballing</div>
+
+<h2>A. The best usable frames (9:16, 580x1015)</h2>
+<div class="grid">
+ <div class="c good"><img src="tc_1.jpg"><div class="m"><span class="n">tc_1 &mdash; rain-soaked alley</span><span class="tag t-good">BEST</span><br>Ymean 35.8 Y5 1.1 Y95 169.8<br>RMS 47.8 &nbsp;detail 2.11 &nbsp;sat 132.9</div></div>
+ <div class="c good"><img src="poly_test.jpg"><div class="m"><span class="n">poly &mdash; warehouse</span><br>Ymean 25.8 Y5 1.0 Y95 106.5<br>RMS 47.8 &nbsp;detail 1.83 &nbsp;sat 139.6</div></div>
+ <div class="c good"><img src="p_sharp.jpg"><div class="m"><span class="n">p_sharp &mdash; sharp prompt</span><span class="tag t-good">+85% detail</span><br>Ymean 39.0 Y5 0.0 Y95 207.0<br>RMS 63.6 &nbsp;detail 3.38 &nbsp;sat 6.9</div></div>
+</div>
+
+<h2>B. The failures &mdash; useful to know</h2>
+<div class="grid">
+ <div class="c bad"><img src="hi_2.jpg"><div class="m"><span class="n">hi_2 &mdash; MUDDY</span><span class="tag t-bad">REJECT</span><br>Ymean 26.9 Y5 2.1 <b>Y95 64.2</b><br><b>RMS 35.3</b> &nbsp;detail 2.45 &nbsp;sat 140.3<br>no highlight = no contrast = mud</div></div>
+ <div class="c"><img src="tc_2.jpg"><div class="m"><span class="n">tc_2 &mdash; motel room</span><span class="tag t-bad">TOO BRIGHT</span><br>Ymean 68.6 Y5 16.1 Y95 207.3<br>RMS 53.9 &nbsp;detail 2.75 &nbsp;sat 93.2</div></div>
+ <div class="c"><img src="ref_test.jpg"><div class="m"><span class="n">ref &mdash; reference</span><br>Ymean 63.8 Y5 9.8 Y95 241.0<br>RMS 70.4 &nbsp;<b>detail 10.87</b> &nbsp;sat 83.3<br>sharp, but bright &mdash; the detail ceiling</div></div>
+</div>
+
+<h2>Verdict</h2>
+<div class="sub" style="font-size:13px;color:#ccc">
+Darkness works reliably (Ymean 26-39, crushed blacks ~1.0).<br>
+Sharp-prompting took <b>detail 1.83 &rarr; 3.38</b> (~85%) but collapsed saturation to 6.9 (near-monochrome).<br>
+Absolute ceiling is <b>detail ~3.4 at 580x1015</b> &mdash; fine under captions + Ken Burns, weak as a hero frame.<br>
+<b>HF Spaces all returned ZeroGPU quota exhaustion</b> ("90s requested vs. 0s left") &mdash; needs a free HF token.
+</div>
+</body></html>
