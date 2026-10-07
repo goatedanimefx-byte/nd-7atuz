@@ -250,6 +250,14 @@ async def _synth_voice(text, clip):
                 dur = (s1 - s0) * (len(wd) + 1) / ln
                 words.append((acc, acc + dur, wd))
                 acc += dur
+    if sents:
+        # exact sentence audio windows (SentenceBoundary) — captions that land
+        # on the real speech onset instead of the char-weighted estimate.
+        toks = [[w for w in str(stext).split() if any(
+            ch.isalnum() for ch in w)] for _, _, stext in sents]
+        (INP / "sents.json").write_text(json.dumps(
+            [[s0, s1, ts] for (s0, s1, _), ts in zip(sents, toks) if ts]),
+            encoding="utf-8")
     if chunks:
         (INP / "vo.mp3").write_bytes(b"".join(chunks))
     if words:
@@ -261,6 +269,7 @@ async def _synth_voice(text, clip):
 def ensure_audio(clip):
     vo = INP / "vo.mp3"
     words = None
+    sents = None
     wf = INP / "words.json"
     if not vo.exists():
         text = clip.get("vo_text")
@@ -268,13 +277,19 @@ def ensure_audio(clip):
             raise SystemExit("zip has no vo.mp3 and clip.json has no vo_text")
         notify("edge-tts: synthesizing VO (%s)" % clip.get("voice"))
         words = asyncio.run(_synth_voice(text, clip))
+        sf = INP / "sents.json"
+        if sf.exists():
+            sents = [tuple(x) for x in json.loads(sf.read_text(encoding="utf-8"))]
         if not vo.exists():
             raise SystemExit("edge-tts produced no audio")
         notify("VO done (%.1fs)" % _ffprobe_dur(vo))
     elif wf.exists():
         words = [tuple(x) for x in json.loads(wf.read_text(encoding="utf-8"))]
+        sf = INP / "sents.json"
+        if sf.exists():
+            sents = [tuple(x) for x in json.loads(sf.read_text(encoding="utf-8"))]
     bgm = INP / "bgm.mp3"
-    return vo, bgm if bgm.exists() else None, words
+    return vo, bgm if bgm.exists() else None, words, sents
 
 
 # ------------------------------ captions ----------------------------------- #
@@ -296,7 +311,7 @@ def _ass_escape(s):
     return re.sub(r"[\{\}]", "", s)
 
 
-def resolve_captions(clip, word_times):
+def resolve_captions(clip, word_times, sents=None):
     cval = clip.get("captions")
     if cval is not None:
         mode = str(cval).strip().lower()
@@ -310,16 +325,26 @@ def resolve_captions(clip, word_times):
         elif mode not in ("word", "auto"):
             word_times = None
     if word_times:
-        # group words into readable chunks (<= 8 words, breaks near full stops)
-        caps, buf, n = [], [], 0
-        for off, end, w in word_times:
-            buf.append(w); n += 1
-            if n >= 8 or w.endswith(".") or w.endswith("?"):
-                caps.append((off, end, " ".join(buf)))
-                buf, n = [], 0
-        if buf:
-            s0, _ = word_times[len(word_times) - len(buf)]
-            caps.append((s0, word_times[-1][1], " ".join(buf)))
+        # papercut: one caption chip per SENTENCE, windowed by the exact
+        # SentenceBoundary audio times — chips appear precisely when the
+        # sentence is spoken (no drift past real speech onset/offset).
+        if clip.get("motif") == "papercut" and sents:
+            caps = [(float(s0), float(s1), " ".join(ts))
+                    for s0, s1, ts in sents]
+        else:
+            # group words into readable chunks (<= 8 words, breaks near full
+            # stops)
+            caps, buf, n = [], [], 0
+            for off, end, w in word_times:
+                buf.append(w); n += 1
+                if n >= 8 or w.endswith(".") or w.endswith("?"):
+                    caps.append((off, end, " ".join(buf)))
+                    buf, n = [], 0
+            if buf:
+                s0, _ = word_times[len(word_times) - len(buf)]
+                caps.append((s0, word_times[-1][1], " ".join(buf)))
+        if not caps:
+            return None
         # keep karaoke continuous: each chunk stays on screen until the next
         # one starts (bridges the natural intonation gaps in the audio).
         hard = float(clip.get("duration") or (word_times[-1][1] + 0.5))
@@ -396,6 +421,7 @@ function lines(txt,maxw){
 }
 function frame(t){
   if(MOTIF==='forensic'){renderForensic(t);return;}
+  if(MOTIF==='papercut'){renderPapercut(t);return;}
   x.clearRect(0,0,W,H);
   var sc=1+0.034*cl(t/DUR);
   x.save();x.translate(W/2,H/2);x.scale(sc,sc);x.translate(-W/2,-H/2);
@@ -792,6 +818,409 @@ function renderForensic(t){
   x.textAlign='right';x.fillText('TOP SECRET // EVID-'+('0'+(i0+1)),W-44,H-62);
   x.textAlign='left';
 }
+function renderPapercut(t){
+  var tot=BEATS.length,i0=-1;
+  for(var k=0;k<tot;k++){if(inwin(t,BEATS[k].start,BEATS[k].end+0.001)){i0=k;break;}}
+  if(i0<0)i0=0;
+  var b=BEATS[i0],bs=b.start,len=b.end-b.start;
+  var PAP='#f7f0dd',CREAM='#f0e5cd',CREAM2='#e6d7b9',CREAM3='#dbc7a5',DEEP='#c3ab83',
+      ILINE='rgba(52,32,12,0.42)',
+      INK='#2b2320',MUTE='#7a6a58',RED='#a51d24',GOLD='#d8ab3e';
+  function cutPath(ox,oy,jag,n){
+    x.beginPath();
+    for(var g=0;g<n;g++){
+      var a=g/n*6.2832;
+      var jx=(seed(g*13.7+3.1+i0*5+7)-.5)*jag,jy=(seed(g*7.1+1.3+i0*11+3)-.5)*jag;
+      var px=Math.cos(a)*ox+jx,py=Math.sin(a)*oy+jy;
+      if(g===0)x.moveTo(px,py);else x.lineTo(px,py);
+    }
+    x.closePath();
+  }
+  function paperBlob(dx,dy,rx,ry,rot,col,jag,shad,alpha){
+    alpha=alpha==null?1:alpha;
+    if(shad){x.save();x.translate(dx,dy+shad);x.rotate(rot);x.fillStyle='rgba(52,32,12,0.20)';cutPath(rx,ry,jag,14);x.fill();x.restore();}
+    x.save();x.translate(dx,dy);x.rotate(rot);
+    x.fillStyle=col;x.globalAlpha=alpha;cutPath(rx,ry,jag,14);x.fill();x.globalAlpha=1;
+    x.restore();
+  }
+  function paperStrip(dx,dy,w,h,rot,col,jag,shad,alpha){
+    alpha=alpha==null?1:alpha;
+    var strip=function(yd,alp){
+      x.save();x.translate(dx,dy+yd);x.rotate(rot);
+      x.fillStyle=col;x.globalAlpha=alp;x.beginPath();
+      x.moveTo(-w/2-jag,-h/2);
+      for(var gx=-w/2;gx<=w/2;gx+=20){x.lineTo(gx,-h/2+(seed(gx*0.7+13+i0*3)-.5)*jag);}
+      x.lineTo(w/2+jag,-h/2);x.lineTo(w/2+jag,h/2);
+      for(var gx2=w/2;gx2>=-w/2;gx2-=20){x.lineTo(gx2,h/2+(seed(gx2*0.9+29+i0*5)-.5)*jag);}
+      x.lineTo(-w/2-jag,h/2);x.closePath();x.fill();x.restore();
+    };
+    if(shad)strip(shad,0.18);strip(0,alpha);
+  }
+  function paperText(txt,cx,cy,size,rot,col,alpha,shw){
+    alpha=alpha==null?1:alpha;shw=shw==null?6:shw;col=col||INK;
+    x.save();x.translate(cx,cy);x.rotate(rot||0);x.textAlign='center';x.textBaseline='middle';
+    x.font='900 '+size+'px Impact,"Arial Black",Arial';
+    if(shw){x.save();x.translate(0,shw*0.6);
+      x.lineWidth=Math.max(2,size*0.035);x.lineJoin='round';
+      x.strokeStyle=ILINE;x.strokeText(txt,0,0);
+      x.fillStyle='rgba(52,32,12,0.26)';x.fillText(txt,0,0);x.restore();}
+    x.lineWidth=Math.max(2,size*0.035);x.lineJoin='round';
+    x.strokeStyle='rgba(43,35,32,0.30)';x.globalAlpha=alpha;x.strokeText(txt,0,0);
+    x.fillStyle=PAP;x.fillText(txt,0,0);
+    x.fillStyle=col;x.fillText(txt,0,0);
+    x.globalAlpha=1;x.restore();
+  }
+  function wrapH(txt,size,maxW){
+    x.font='900 '+size+'px Impact,"Arial Black",Arial';
+    var wd=txt.split(' '),ls=[],cur=wd[0];
+    for(var i=1;i<wd.length;i++){
+      var tt=cur+' '+wd[i];
+      if(x.measureText(tt).width>maxW){ls.push(cur);cur=wd[i];}else cur=tt;
+    }
+    ls.push(cur);return ls.slice(0,2);
+  }
+  function easeBack(p){p=cl(p);var c1=1.70158,c3=c1+1;return 1+c3*Math.pow(p-1,3)+c1*Math.pow(p-1,2);}
+  function pi(d){return Math.max(0,easeBack(cl((t-bs-d)/0.5)));}
+  function tape(dx,dy,s,rot){x.save();x.translate(dx,dy);x.rotate(rot||0.7);
+    x.fillStyle='rgba(232,216,182,0.8)';x.fillRect(-s/2,-s/8,s,s/4);x.restore();}
+
+  // ---- camera: slow dolly + multi-layer parallax ----
+  var kb=1+0.14*cl(t/DUR),shx=Math.sin(t*0.12)*26+Math.sin(t*0.31+i0)*9,
+      shy=Math.cos(t*0.10)*18+Math.cos(t*0.23+i0*2)*7;
+  x.save();x.translate(W/2,H/2);x.scale(kb,kb);x.translate(-W/2,-H/2);
+  x.translate(shx*0.35,shy*0.35);
+
+  // ---- L0 billboard: aged kraft paper ----
+  var g0=x.createLinearGradient(0,0,0,H);
+  g0.addColorStop(0,'#f2e8d2');g0.addColorStop(.5,'#eadfc2');g0.addColorStop(1,'#ddcaa8');
+  x.fillStyle=g0;x.fillRect(-80,-80,W+160,H+160);
+  for(var mt=0;mt<420;mt++){x.fillStyle='rgba(120,90,40,'+(0.010+0.018*seed(mt*1.3))+')';x.fillRect(seed(mt*2.1)*(W+160)-60,seed(mt*3.7)*(H+160)-80,2,2);}
+  for(var fb=0;fb<70;fb++){
+    var fxb=seed(fb*1.9)*W,fyb=seed(fb*5.3)*H;
+    x.strokeStyle='rgba(140,100,45,'+(0.028+0.045*seed(fb*7.7))+')';x.lineWidth=1;
+    x.beginPath();x.moveTo(fxb,fyb);x.lineTo(fxb+8+seed(fb*2.3)*16,fyb+2+seed(fb*3.1)*5);x.stroke();
+  }
+  for(var st=0;st<4;st++){
+    x.strokeStyle='rgba(150,115,60,'+(0.05+0.03*Math.sin(t*0.2+st))+')';x.lineWidth=2;
+    x.beginPath();x.arc(seed(st*7.7)*W,H*0.28+seed(st*3.1)*H*0.5,60+seed(st*1.7)*70,0,6.2832);x.stroke();
+  }
+  // ---- L1 floating paper scraps + drifting dust ----
+  for(var sp=0;sp<8;sp++){
+    var sx=(seed(sp*3.7)*W+Math.sin(t*(0.15+seed(sp)*0.25)+sp*2)*22)%W,
+        sy=(seed(sp*6.1)*H+Math.sin(t*(0.11+seed(sp)*0.2)+sp*3)*30+sp*14)%H;
+    paperStrip(sx,sy,44+seed(sp*1.1)*22,18+seed(sp*2.9)*12,Math.sin(t*0.4+sp*1.7)*0.4,sp%2?CREAM2:PAP,7,0,0.55+0.25*Math.sin(t+sp*1.3));
+  }
+  for(var sn=0;sn<40;sn++){
+    var snx=(seed(sn*1.3)*W+Math.sin(t*(0.4+seed(sn)*0.5)+sn)*8)%W,
+        sny=(seed(sn*2.7)*H+t*(18+seed(sn)*30))%(H*1.15)-50;
+    x.fillStyle='rgba(255,252,240,'+(0.18+0.30*Math.sin(t*2+sn))+')';
+    x.beginPath();x.arc(snx,sny,1.5+seed(sn*3.1)*2.4,0,6.2832);x.fill();
+  }
+  for(var sn2=0;sn2<22;sn2++){
+    var snx2=(seed(sn2*7.7)*W+Math.sin(t*(1.1+seed(sn2)*0.6)+sn2)*10)%W,
+        sny2=(seed(sn2*9.1)*H+t*(46+seed(sn2)*34))%(H*1.05)-40;
+    x.fillStyle='rgba(255,250,235,'+(0.12+0.22*Math.sin(t*3+sn2))+')';
+    x.beginPath();x.arc(snx2,sny2,1+seed(sn2*11.3)*1.6,0,6.2832);x.fill();
+  }
+
+  // ---- scene tableaus (paper-cut dioramas, contact-pop per beat) ----
+  function scene0(){
+    var pb=pi(0.06);
+    paperBlob(W*0.77,H*0.33,120,120,0.10+Math.sin(t*0.3)*0.02,PAP,16,7,pb);
+    paperBlob(W*0.77+30,H*0.33-16,90,90,0,GOLD,12,0,pb*0.5);
+    paperBlob(W*0.77-10,H*0.33+4,40,30,0,CREAM2,10,0,pb);
+    for(var L=0;L<3;L++){
+      var baseY=H*0.64,lw=Math.min(W-300,420+L*46),h0=H*(0.30+L*0.06),h1=H*(0.34+L*0.09);
+      x.save();x.translate(W*0.46+((L%2?-1:1)*Math.sin(t*0.12+L*1.7)*8),0);
+      x.fillStyle=L===0?CREAM3:(L===1?CREAM2:DEEP);
+      x.beginPath();x.moveTo(-30,baseY);
+      for(var q=0;q<11;q++){
+        var bx=q/10*lw;
+        var bhh=h0+(h1-h0)*seed(q*3.3+L*7)+Math.sin(t*0.5+q*2+L)*6;
+        x.lineTo(bx,baseY-bhh);x.lineTo(bx+30+seed(q*1.1+L)*10,baseY-bhh);
+      }
+      x.lineTo(lw+30,baseY);x.lineTo(lw+30,H*0.66);x.lineTo(-30,H*0.66);x.closePath();x.fill();
+      x.fillStyle='rgba(150,110,55,0.5)';
+      for(var q2=0;q2<10;q2++){var byy=baseY-6-(h0+seed(q2*2.3+L*4)*h1-46);x.fillRect(q2/10*lw*1.7,byy,5,7);}
+      x.restore();
+    }
+    x.strokeStyle='rgba(60,42,20,0.55)';x.lineWidth=2.5;
+    for(var br=0;br<2;br++){
+      var bxx=W*(0.28+br*0.20+seed(br)*0.05)+Math.sin(t*0.5+br*3)*6,byy=H*0.20+Math.sin(t*0.3+br)*5;
+      x.beginPath();x.moveTo(bxx-16,byy);x.quadraticCurveTo(bxx-8,byy-10,bxx,byy);
+      x.quadraticCurveTo(bxx+8,byy-10,bxx+16,byy);x.stroke();
+    }
+  }
+  function scene1(){
+    var pb=pi(0.06);
+    x.save();x.translate(Math.sin(t*0.5)*5,0);
+    paperBlob(W*0.50,H*0.64,250,44,0,DEEP,20,8,pb);
+    paperBlob(W*0.50,H*0.52,170,120,0,CREAM,18,8,pb);
+    paperBlob(W*0.50,H*0.385,196,78,-0.03,CREAM3,22,8,pb);
+    paperStrip(W*0.50,H*0.585,56,84,0,CREAM2,14,6,pb);
+    for(var wi=0;wi<4;wi++){
+      var wx2=W*0.50+(wi%2?78:-78),wy2=H*0.505+(wi<2?0:46);
+      var glow=0.35+0.65*Math.sin(t*(4+wi*0.7)+wi*2.4);
+      paperBlob(wx2,wy2,26,26,Math.sin(t*0.6+wi)*0.05,wi%2?GOLD:CREAM2,10,3,pb);
+      x.fillStyle='rgba(165,29,36,'+(0.15+0.25*glow)+')';
+      x.beginPath();x.arc(wx2,wy2,12+(0.5+0.5*Math.sin(t*4+wi*1.3))*8,0,6.2832);x.fill();
+    }
+    x.strokeStyle='rgba(165,29,36,0.7)';x.lineWidth=3;
+    for(var dd=0;dd<6;dd++){
+      var dw=W*0.50-170+dd*62;
+      for(var dl=0;dl<3;dl++){
+        var ly=H*0.58+dl*16+seed(dd*3.1+dl)*8;
+        x.beginPath();x.moveTo(dw,ly);x.lineTo(dw+10+seed(dd*1.7)*6,ly+14);x.stroke();
+      }
+    }
+    x.restore();
+    paperStrip(W*0.21,H*0.42,120,46,-0.12,CREAM,12,5,pb*pi(0.22));
+    paperText('EVID-0'+(i0+1),W*0.21,H*0.42,26,-0.12,MUTE,0.9*pi(0),2);
+  }
+  function scene2(){
+    var pb=pi(0.06);
+    x.save();
+    paperBlob(W*0.50,H*0.52,178,220,0,CREAM3,20,9,pb);
+    x.strokeStyle='rgba(80,55,25,0.6)';x.lineWidth=4;
+    x.beginPath();x.moveTo(W*0.50-150,H*0.64);x.lineTo(W*0.50+150,H*0.64);x.stroke();
+    paperBlob(W*0.50,H*0.52,120,150,0,CREAM,16,6,pb);
+    paperBlob(W*0.50,H*0.46,26,26,0,PAP,8,3,pb);
+    x.beginPath();x.arc(W*0.50,H*0.46,12,0,6.2832);x.strokeStyle='rgba(80,55,25,0.6)';x.stroke();
+    x.restore();
+    paperBlob(W*0.50,H*0.30,64,52,-0.03+Math.sin(t*0.4)*0.02,CREAM2,18,7,pi(0.18));
+    paperBlob(W*0.50,H*0.255,30,30,0,CREAM2,10,4,pi(0.18));
+    x.strokeStyle='rgba(90,62,30,0.8)';x.lineWidth=6;
+    x.beginPath();x.arc(W*0.50,H*0.255,20,-0.9,0.9);x.stroke();
+    paperBlob(W*0.50,H*0.255,8,8,0,RED,4,0,pi(0.2));
+    paperBlob(W*0.80,H*0.36,86,40,0.16,PAP,14,6,pi(0.26));
+    paperText('VERIFIED',W*0.80,H*0.36,30,0.16,RED,0.95*pi(0),2);
+    paperText('NO FORCED ENTRY',W*0.80,H*0.40,20,0.16,MUTE,0.9*pi(0),1);
+  }
+  function scene3(){
+    var pb=pi(0.06);
+    x.save();x.translate(Math.sin(t*0.4)*4,0);
+    paperBlob(W*0.50,H*0.56,150,200,0,CREAM3,20,8,pb);
+    paperBlob(W*0.66,H*0.50,64,130,-0.16,CREAM,14,6,pb);
+    for(var s=0;s<3;s++)paperStrip(W*0.50,H*(0.44+0.07*s),250,10,0,CREAM2,9,3,pb*pi(s*0.06));
+    paperStrip(W*0.42,H*0.585,54,76,0.06,PAP,12,5,pb);
+    paperStrip(W*0.60,H*0.60,40,40,0.08,CREAM2,10,4,pb);
+    x.fillStyle=INK;x.beginPath();x.arc(W*0.60,H*0.60,8,0,6.2832);x.fill();
+    paperStrip(W*0.52,H*0.66,18,6,0.6,GOLD,6,2,pb);
+    for(var cr=0;cr<14;cr++){x.fillStyle='rgba(60,40,15,0.5)';
+      x.fillRect(W*0.44+seed(cr*1.1)*W*0.14,Math.sin(t*0.8+cr)*1+H*0.67+seed(cr*2.3)*14,4,4);}
+    x.restore();
+    paperBlob(W*0.84,H*0.30,56,56,0,CREAM2,12,6,pi(0.2));
+    x.strokeStyle='rgba(60,42,20,0.6)';x.lineWidth=3;
+    x.beginPath();x.moveTo(W*0.84,H*0.30);x.lineTo(W*0.84,H*0.20);x.stroke();
+    x.beginPath();x.moveTo(W*0.84,H*0.30);x.lineTo(W*0.87,H*0.30);x.stroke();
+    x.fillStyle=MUTE;x.font='700 22px Arial';x.textAlign='center';
+    x.fillText('4 AM',W*0.84,H*0.365);x.textAlign='left';
+  }
+  function scene4(){
+    var pb=pi(0.06);
+    paperBlob(W*0.50,H*0.50,186,120,0,CREAM,14,7,pb);
+    paperBlob(W*0.50,H*0.40,210,44,0.03,CREAM2,16,6,pb);
+    x.strokeStyle='rgba(90,62,30,0.8)';x.lineWidth=7;
+    x.beginPath();x.moveTo(W*0.58,H*0.38);x.lineTo(W*0.56,H*0.27);
+    x.lineTo(W*0.565,H*0.27);x.stroke();
+    x.lineWidth=3;
+    x.beginPath();x.arc(W*0.565,H*0.27,3,0,6.2832);x.fillStyle=RED;x.fill();
+    x.strokeStyle='rgba(124,21,24,0.85)';x.lineWidth=4;
+    for(var sw=0;sw<5;sw++){
+      var rr0=16+sw*12,aa0=t*(0.6+sw*0.12)+sw*1.6;
+      x.beginPath();x.arc(W*0.50,H*0.52,rr0,aa0,aa0+2.0);x.stroke();
+    }
+    x.strokeStyle='rgba(124,21,24,0.7)';x.lineWidth=5;
+    for(var dr2=0;dr2<5;dr2++){
+      var dx2=W*(0.38+dr2*0.11)+Math.sin(t*0.7+dr2)*3;
+      var dy2=H*(0.57+0.02*Math.sin(t*0.5+dr2));
+      x.beginPath();x.moveTo(dx2,dy2);x.lineTo(dx2,dy2+18+seed(dr2*3.3)*16);x.stroke();
+      x.beginPath();x.arc(dx2,dy2+22+seed(dr2*3.3)*16,5,0,6.2832);x.fill();
+    }
+    paperStrip(W*0.79,H*0.42,104,36,-0.10,CREAM2,10,5,pb*pi(0.18));
+    paperText('BLOOD.',W*0.79,H*0.42,26,-0.10,RED,0.92*pi(0),2);
+  }
+  function scene5(){
+    var pb=pi(0.06);
+    x.save();x.translate(Math.sin(t*0.5)*6,0);
+    paperBlob(W*0.62,H*0.53,92,200,-0.05,CREAM3,20,8,pb);
+    paperBlob(W*0.62,H*0.335,34,34,-0.05,PAP,12,5,pb);
+    paperBlob(W*0.92,H*0.50,30,44,0.3,CREAM2,10,4,pb);
+    for(var lg=0;lg<4;lg++){
+      x.strokeStyle='rgba(52,32,12,0.5)';x.lineWidth=6;
+      x.beginPath();
+      x.moveTo(W*0.62,H*0.62);
+      x.lineTo(W*0.62+(lg%2?34:-34),H*0.68+Math.sin(t*0.9+lg*1.5)*4);x.stroke();
+    }
+    paperStrip(W*0.30,H*0.34,56,100,0.5,PAP,9,4,pb);
+    paperStrip(W*0.34,H*0.30,56,100,0.66,CREAM,9,4,pb*pi(0.1));
+    paperStrip(W*0.27,H*0.38,56,100,0.38,DEEP,9,4,pb*pi(0.18));
+    for(var tg=0;tg<3;tg++){
+      var tx3=W*(0.27+tg*0.035),ty3=H*(0.34+tg*0.04);
+      var lbl=['JACKET','BELT','KNIFE'][tg];
+      x.fillStyle=MUTE;x.font='700 20px Arial';x.textAlign='center';
+      x.save();x.translate(tx3,ty3+H*0.036);x.rotate(0.5+tg*0.03);
+      x.fillText(lbl,0,0);x.restore();x.textAlign='left';
+    }
+    x.restore();
+    x.strokeStyle='rgba(70,90,120,0.35)';x.lineWidth=3;
+    for(var rn=0;rn<12;rn++){
+      var rx2=(seed(rn*5.1)*W+Math.sin(t*1.6+rn)*4)%W,ry2=(seed(rn*3.3)*H+t*(240+seed(rn)*180))%(H*0.7);
+      x.beginPath();x.moveTo(rx2,ry2);x.lineTo(rx2-22,ry2+40);x.stroke();
+    }
+  }
+  function scene6(){
+    var pb=pi(0.06);
+    x.save();x.translate(Math.sin(t*0.4)*4,0);
+    paperStrip(W*0.40,H*0.50,210,120,-0.10,CREAM,14,7,pb);
+    paperStrip(W*0.60,H*0.52,210,130,0.10,CREAM2,14,7,pb*pi(0.08));
+    paperStrip(W*0.28,H*0.42,64,40,-0.7,CREAM3,10,4,pb);
+    paperBlob(W*0.76,H*0.36,66,84,0,PAP,10,6,pi(0.2));
+    x.fillStyle=MUTE;x.font='700 26px Arial';x.textAlign='center';
+    x.fillText('2000',W*0.76,H*0.33);x.fillText('... 25yrs',W*0.76,H*0.37);
+    x.font='700 18px Arial';x.fillStyle=RED;x.fillText('2026',W*0.76,H*0.40);x.textAlign='left';
+    x.strokeStyle=GOLD;x.lineWidth=3;
+    x.beginPath();x.arc(W*0.76,H*0.50,30,0,6.2832);x.stroke();
+    paperBlob(W*0.76,H*0.50,20,20,0,CREAM2,8,2,pi(0.26));
+    x.strokeStyle='rgba(60,42,20,0.7)';x.lineWidth=5;
+    x.beginPath();x.arc(W*0.76,H*0.50,16,0,6.2832);x.stroke();
+    x.restore();
+    paperStrip(W*0.50,H*0.62,120,34,0.02,PAP,12,5,pi(0.3));
+    paperText('OPEN CASE',W*0.50,H*0.62,28,0.02,RED,0.95*pi(0),2);
+  }
+  function scene7(){
+    var pb=pi(0.06);
+    x.save();x.translate(Math.sin(t*0.4)*5,0);
+    x.strokeStyle=ILINE;x.lineWidth=10;x.lineCap='round';
+    for(var r=0;r<2;r++){
+      x.globalAlpha=0.95*(pb*0.70+0.30)*1;
+      x.beginPath();
+      for(var q=0;q<26;q++){
+        var qp=q/26*6.2832*2,yy=H*0.40+qp/12.5664*(H*0.22);
+        var xx=W*0.50+Math.sin(qp*1.5708+r*3.1416)*(70+Math.sin(t*0.6+r)*8);
+        if(q===0)x.moveTo(xx,yy);else x.lineTo(xx,yy);
+      }
+      x.stroke();
+      x.globalAlpha=1;
+    }
+    for(var q=0;q<26;q++){
+      var qp=q/26*6.2832*2,yy=H*0.40+qp/12.5664*(H*0.22);
+      x.strokeStyle=GOLD;x.lineWidth=4;
+      x.beginPath();x.moveTo(W*0.50-70+Math.sin(qp+r*3)*8,yy);x.lineTo(W*0.50+70+Math.sin(qp+r*3)*8,yy);x.stroke();
+    }
+    paperBlob(W*0.28,H*0.32,46,56,0.2,PAP,10,4,pi(0.24));
+    x.strokeStyle='rgba(60,42,20,0.6)';x.lineWidth=2;
+    for(var fp=0;fp<3;fp++){x.beginPath();x.arc(W*0.28,H*(0.32+fp*0.022),14-fp*4,0,6.2832);x.stroke();}
+    x.restore();
+    paperStrip(W*0.50,H*0.66,150,40,0.00,PAP,12,6,pi(0.3));
+    paperText('THE CLOCK NEVER STOPS',W*0.50,H*0.66,26,0,RED,0.95*pi(0),2);
+  }
+  // paper-tremble weave across the whole diorama (organic handmade movement)
+  x.save();x.translate(Math.sin(t*1.7)*3+Math.sin(t*0.6)*2,Math.cos(t*2.3)*2.5+Math.cos(t*0.8)*1.5);
+  switch(i0){
+    case 0:scene0();break; case 1:scene1();break; case 2:scene2();break;
+    case 3:scene3();break; case 4:scene4();break; case 5:scene5();break;
+    case 6:scene6();break; case 7:scene7();break; default:scene0();
+  }
+  x.restore();
+
+  // ---- headline: paper-cut type ----
+  var hsz=(String(b.text).length>58?92:118);
+  var hlns=wrapH(String(b.text),hsz,Math.min(W-190,900));
+  var hcy=H*0.175;
+  for(var hl=0;hl<hlns.length;hl++){
+    var hp=pi(0.10+hl*0.10);
+    paperText(hlns[hl],W/2+Math.sin(t*0.6+hl)*3,hcy+(hl*(hsz*1.02))+Math.sin(t*0.8+hl)*2,hsz,
+              (hl%2?-0.008:0.008)+Math.sin(t*0.3+hl)*0.01,INK,0.15+0.85*hp,5);
+  }
+  var pp=cl((t-bs)/len);
+  x.strokeStyle=RED;x.lineWidth=5;x.lineCap='round';
+  x.beginPath();x.moveTo(W/2-160,H*0.30);x.lineTo(W/2-160+Math.max(6,(W-320)*ease(pp)),H*0.30);x.stroke();
+  x.fillStyle=MUTE;x.font='700 26px Arial';x.textAlign='center';
+  x.fillText('BEAT '+('0'+(i0+1))+' / '+('0'+tot),W/2,H*0.33);x.textAlign='left';
+
+  x.restore();
+
+  // ---- torn-paper wipe on beat cuts ----
+  var flr=1-ease(seg(t,bs,0.05));
+  if(flr>0.02){
+    x.save();
+    for(var slk=0;slk<5;slk++){
+      var slx=W*(0.2+slk*0.15)+(1-flr)*-20+((seed(slk*3.1+i0*7)-.5)*30);
+      x.fillStyle='rgba(247,240,221,'+(flr*0.35)+')';
+      x.beginPath();x.moveTo(slx,0);
+      for(var slq=0;slq<20;slq++){x.lineTo(slx+10,slq*(H/20)+(seed(slk+slq*7+i0)-.5)*28);}
+      x.lineTo(slx+10,H);x.lineTo(slx,H);x.closePath();x.fill();
+    }
+    x.globalAlpha=flr*0.12;x.fillStyle='#fff';x.fillRect(0,0,W,H);x.globalAlpha=1;
+    x.restore();
+  }
+
+  // ---- caption chip: paper note pinned in the karaoke band ----
+  if(CAPS&&CAPS.length){
+    for(var cp=0;cp<CAPS.length;cp++){
+      var c0=CAPS[cp][0],c1=CAPS[cp][1];
+      if(t>=c0&&t<c1){
+        var wts=String(CAPS[cp][2]).split(' ');
+        x.font='900 56px Impact,"Arial Black",Arial';
+        x.textAlign='left';x.textBaseline='alphabetic';
+        var bsx=[],bt=0;
+        for(var wi=0;wi<wts.length;wi++){var bww=x.measureText(wts[wi]+' ').width;bsx.push(bww);bt+=bww;}
+        var gw=bt-x.measureText(' ').width;
+        var chipW=Math.min(gw+170,W-240),cyy=H*0.72;
+        paperStrip(W/2,cyy,chipW,108,0.01+0.006*Math.sin(t*0.9),CREAM,16,8,0.97);
+        tape(W/2-chipW/2+12,cyy-50,26,0.9);tape(W/2+chipW/2-12,cyy-50,26,-0.9);
+        tape(W/2-chipW/2+12,cyy+50,26,-0.9);tape(W/2+chipW/2-12,cyy+50,26,0.9);
+        var frac=cl((t-c0)/(c1-c0));
+        var aw=Math.min(wts.length-1,Math.floor(frac*wts.length));
+        var xx0=W/2-gw/2;
+        for(var wi=0;wi<wts.length;wi++){
+          var act=wi===aw;
+          x.save();x.translate(xx0+bsx[wi]/2,cyy);
+          if(act){x.scale(1.22,1.22);x.rotate(0.02*Math.sin(t*6));}
+          x.font='900 56px Impact,"Arial Black",Arial';
+          x.textAlign='center';x.textBaseline='middle';
+          x.lineWidth=5;x.lineJoin='round';x.strokeStyle='rgba(43,35,32,0.25)';
+          x.strokeText(wts[wi],0,0);
+          x.fillStyle=act?RED:INK;x.fillText(wts[wi],0,0);
+          x.restore();
+          if(act){
+            x.strokeStyle=RED;x.lineWidth=6;x.lineCap='round';
+            x.beginPath();x.moveTo(xx0+6,cyy+38);x.lineTo(xx0+bsx[wi]-10,cyy+42);x.stroke();
+          }
+          xx0+=bsx[wi];
+        }
+        x.textAlign='left';
+        break;
+      }
+    }
+  }
+
+  // ---- top-left beat tag ----
+  paperStrip(64,92,132,44,0,MUTE,10,4,0.95);
+  x.font='900 26px Impact,"Arial Black",Arial';x.textAlign='center';x.textBaseline='middle';
+  x.fillStyle=PAP;x.fillText('BEAT '+('0'+(i0+1))+' / '+('0'+tot),64+66,92);
+  x.textBaseline='alphabetic';x.textAlign='left';
+
+  // ---- bottom progress strip ----
+  var bx0=60,bx1=W-60,by0=H-46;
+  x.strokeStyle='rgba(90,70,40,0.35)';x.lineWidth=4;
+  x.beginPath();x.moveTo(bx0,by0);x.lineTo(bx1,by0);x.stroke();
+  var pw2=(bx1-bx0)*ease(cl(t/DUR));
+  x.strokeStyle=RED;x.lineWidth=8;x.lineCap='round';
+  x.beginPath();x.moveTo(bx0,by0);x.lineTo(bx0+pw2,by0);x.stroke();
+  x.fillStyle=MUTE;x.font='700 24px Arial';x.textAlign='left';
+  x.fillText(fmt(t)+' / '+fmt(DUR),bx0,by0-16);x.fillText('PAPER CUT',bx1,by0-16);
+  x.textAlign='right';x.textAlign='left';
+
+  // ---- finish: grain dust + vignette ----
+  var gg2=Math.floor(t*30);
+  x.fillStyle='rgba(90,70,40,0.030)';
+  for(var gr2=0;gr2<330;gr2++){x.fillRect(seed(gr2*1.7+gg2*13.1)*W,seed(gr2*2.3+gg2*7.7)*H,1,1);}
+  var vg=x.createRadialGradient(W/2,H*0.5,H*0.3,W/2,H*0.5,H*0.95);
+  vg.addColorStop(0,'rgba(70,50,20,0)');vg.addColorStop(1,'rgba(60,40,18,0.24)');
+  x.fillStyle=vg;x.fillRect(0,0,W,H);
+}
 window.__render=frame;
 })();
 </script></body></html>""".replace("__W__", str(W)).replace("__H__", str(H)).replace(
@@ -946,7 +1375,7 @@ def main(clip_path=None, fps=None):
     fps = fps or int(clip.get("fps", 30))
     notify("clip: %s  beats=%d" % (clip.get("title", src.name),
                                    len(clip["beats"])))
-    vo, bgm, words = ensure_audio(clip)
+    vo, bgm, words, sents = ensure_audio(clip)
     vo_dur = _ffprobe_dur(vo)
     if vo_dur > 0.5:
         # finishing: video = narration + pad, last line lands with the last word —
@@ -956,7 +1385,7 @@ def main(clip_path=None, fps=None):
         clip["duration"] = float(clip.get("duration") or 3)
     _vo_sync_beats(clip, words)
     clip["beats"][-1]["end"] = clip["duration"]
-    caps = resolve_captions(clip, words)
+    caps = resolve_captions(clip, words, sents)
     if caps:
         notify("captions: %d (word-sync=%s)" % (
             len(caps), "yes" if words else "phrase"))

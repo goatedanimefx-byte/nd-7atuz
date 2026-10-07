@@ -425,7 +425,8 @@ def interview() -> dict:
 _TOPIC_CLIPS: dict[str, dict] = {
     "setagaya family murder": {
         "title": "SETAGAYA — THE FAMILY NOBODY FOUND",
-        "accent": "#ff1e27",
+        "accent": "#a51d24",
+        "motif": "papercut",
         "beats": [
             {"start": 0, "end": 5, "text": "TOKYO. DECEMBER 31, 2000",
              "shot": "redacted file sheet, red stamp"},
